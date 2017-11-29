@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mind Map</title>
+    <meta name="description" content="A mind map editor, showing how subtrees can be moved, copied, deleted, and laid out." />
+    <!-- Copyright 1998-2017 by Northwoods Software Corporation. -->
+    <meta charset="UTF-8">
+    <!-- Bootstrap core CSS -->
+    <link href="assets/css/bootstrap.css" rel="stylesheet">
+    <!--external css-->
+    <link href="assets/font-awesome/css/font-awesome.css" rel="stylesheet" />
+
+    <!-- Custom styles for this template -->
+    <link href="assets/css/style.css" rel="stylesheet">
+    <link href="assets/css/style-responsive.css" rel="stylesheet">
+    <script src="./contents_mindmap/release/go.js"></script>
+    <script id="code">
+        function init() {
+            //if (window.goSamples) goSamples(); // init for these samples -- you don't need to call this
+            var $ = go.GraphObject.make;
+
+
+            myDiagram =
+                $(go.Diagram, "myDiagramDiv", {
+                    // when the user drags a node, also move/copy/delete the whole subtree starting with that node
+                    "commandHandler.copiesTree": true,
+                    "commandHandler.deletesTree": true,
+                    "draggingTool.dragsTree": true,
+                    initialContentAlignment: go.Spot.Center, // center the whole graph
+                    "undoManager.isEnabled": true
+                });
+
+            // when the document is modified, add a "*" to the title and enable the "Save" button
+            myDiagram.addDiagramListener("Modified", function(e) {
+                var button = document.getElementById("SaveButton");
+                if (button) button.disabled = !myDiagram.isModified;
+                var idx = document.title.indexOf("*");
+                if (myDiagram.isModified) {
+                    if (idx < 0) document.title += "*";
+                } else {
+                    if (idx >= 0) document.title = document.title.substr(0, idx);
+                }
+            });
+
+            // a node consists of some text with a line shape underneath
+            myDiagram.nodeTemplate =
+                $(go.Node, "Vertical", {
+                        selectionObjectName: "TEXT"
+                    },
+                    $(go.TextBlock, {
+                            name: "TEXT",
+                            minSize: new go.Size(30, 15),
+                            editable: true
+                        },
+                        // remember not only the text string but the scale and the font in the node data
+                        new go.Binding("text", "text").makeTwoWay(),
+                        new go.Binding("scale", "scale").makeTwoWay(),
+                        new go.Binding("font", "font").makeTwoWay()),
+                    $(go.Shape, "LineH", {
+                            stretch: go.GraphObject.Horizontal,
+                            strokeWidth: 3,
+                            height: 3,
+                            // this line shape is the port -- what links connect with
+                            portId: "",
+                            fromSpot: go.Spot.LeftRightSides,
+                            toSpot: go.Spot.LeftRightSides
+                        },
+                        new go.Binding("stroke", "brush"),
+                        // make sure links come in from the proper direction and go out appropriately
+                        new go.Binding("fromSpot", "dir", function(d) {
+                            return spotConverter(d, true);
+                        }),
+                        new go.Binding("toSpot", "dir", function(d) {
+                            return spotConverter(d, false);
+                        })),
+                    // remember the locations of each node in the node data
+                    new go.Binding("location", "loc", go.Point.parse).makeTwoWay(go.Point.stringify),
+                    // make sure text "grows" in the desired direction
+                    new go.Binding("locationSpot", "dir", function(d) {
+                        return spotConverter(d, false);
+                    })
+                );
+
+            // selected nodes show a button for adding children
+            myDiagram.nodeTemplate.selectionAdornmentTemplate =
+                $(go.Adornment, "Spot",
+                    $(go.Panel, "Auto",
+                        // this Adornment has a rectangular blue Shape around the selected node
+                        $(go.Shape, {
+                            fill: null,
+                            stroke: "dodgerblue",
+                            strokeWidth: 3
+                        }),
+                        $(go.Placeholder, {
+                            margin: new go.Margin(4, 4, 0, 4)
+                        })
+                    ),
+                    // and this Adornment has a Button to the right of the selected node
+                    $("Button", {
+                            alignment: go.Spot.Right,
+                            alignmentFocus: go.Spot.Left,
+                            click: addNodeAndLink // define click behavior for this Button in the Adornment
+                        },
+                        $(go.TextBlock, "+", // the Button content
+                            {
+                                font: "bold 8pt sans-serif"
+                            })
+                    )
+                );
+
+            // the context menu alEasys users to change the font size and weight,
+            // and to perform a limited tree layout starting at that node
+            myDiagram.nodeTemplate.contextMenu =
+                $(go.Adornment, "Vertical",
+                    $("ContextMenuButton",
+                        $(go.TextBlock, "Bigger"), {
+                            click: function(e, obj) {
+                                changeTextSize(obj, 1.1);
+                            }
+                        }),
+                    $("ContextMenuButton",
+                        $(go.TextBlock, "Smaller"), {
+                            click: function(e, obj) {
+                                changeTextSize(obj, 1 / 1.1);
+                            }
+                        }),
+                    $("ContextMenuButton",
+                        $(go.TextBlock, "Bold/Normal"), {
+                            click: function(e, obj) {
+                                toggleTextWeight(obj);
+                            }
+                        }),
+                    $("ContextMenuButton",
+                        $(go.TextBlock, "Layout"), {
+                            click: function(e, obj) {
+                                var adorn = obj.part;
+                                adorn.diagram.startTransaction("Subtree Layout");
+                                layoutTree(adorn.adornedPart);
+                                adorn.diagram.commitTransaction("Subtree Layout");
+                            }
+                        }
+                    )
+                );
+
+            // a link is just a Bezier-curved line of the same color as the node to which it is connected
+            myDiagram.linkTemplate =
+                $(go.Link, {
+                        curve: go.Link.Bezier,
+                        fromShortLength: -2,
+                        toShortLength: -2,
+                        selectable: false
+                    },
+                    $(go.Shape, {
+                            strokeWidth: 3
+                        },
+                        new go.Binding("stroke", "toNode", function(n) {
+                            if (n.data.brush) return n.data.brush;
+                            return "black";
+                        }).ofObject())
+                );
+
+            // the Diagram's context menu just displays commands for general functionality
+            myDiagram.contextMenu =
+                $(go.Adornment, "Vertical",
+                    $("ContextMenuButton",
+                        $(go.TextBlock, "Undo"), {
+                            click: function(e, obj) {
+                                e.diagram.commandHandler.undo();
+                            }
+                        },
+                        new go.Binding("visible", "", function(o) {
+                            return o.diagram && o.diagram.commandHandler.canUndo();
+                        }).ofObject()),
+                    $("ContextMenuButton",
+                        $(go.TextBlock, "Redo"), {
+                            click: function(e, obj) {
+                                e.diagram.commandHandler.redo();
+                            }
+                        },
+                        new go.Binding("visible", "", function(o) {
+                            return o.diagram && o.diagram.commandHandler.canRedo();
+                        }).ofObject()),
+                    $("ContextMenuButton",
+                        $(go.TextBlock, "Save"), {
+                            click: function(e, obj) {
+                                save();
+                            }
+                        }),
+                    $("ContextMenuButton",
+                        $(go.TextBlock, "Load"), {
+                            click: function(e, obj) {
+                                load();
+                            }
+                        })
+                );
+
+            myDiagram.addDiagramListener("SelectionMoved", function(e) {
+                var rootX = myDiagram.findNodeForKey(0).location.x;
+                myDiagram.selection.each(function(node) {
+                    if (node.data.parent !== 0) return; // Only consider nodes connected to the root
+                    var nodeX = node.location.x;
+                    if (rootX < nodeX && node.data.dir !== "right") {
+                        updateNodeDirection(node, "right");
+                    } else if (rootX > nodeX && node.data.dir !== "left") {
+                        updateNodeDirection(node, "left");
+                    }
+                    layoutTree(node);
+                });
+            });
+
+            // read in the predefined graph using the JSON format data held in the "mySavedModel" textarea
+            load();
+        }
+
+        function spotConverter(dir, from) {
+            if (dir === "left") {
+                return (from ? go.Spot.Left : go.Spot.Right);
+            } else {
+                return (from ? go.Spot.Right : go.Spot.Left);
+            }
+        }
+
+        function changeTextSize(obj, factor) {
+            var adorn = obj.part;
+            adorn.diagram.startTransaction("Change Text Size");
+            var node = adorn.adornedPart;
+            var tb = node.findObject("TEXT");
+            tb.scale *= factor;
+            adorn.diagram.commitTransaction("Change Text Size");
+        }
+
+        function toggleTextWeight(obj) {
+            var adorn = obj.part;
+            adorn.diagram.startTransaction("Change Text Weight");
+            var node = adorn.adornedPart;
+            var tb = node.findObject("TEXT");
+            // assume "bold" is at the start of the font specifier
+            var idx = tb.font.indexOf("bold");
+            if (idx < 0) {
+                tb.font = "bold " + tb.font;
+            } else {
+                tb.font = tb.font.substr(idx + 5);
+            }
+            adorn.diagram.commitTransaction("Change Text Weight");
+        }
+
+        function updateNodeDirection(node, dir) {
+            myDiagram.model.setDataProperty(node.data, "dir", dir);
+            // recursively update the direction of the child nodes
+            var chl = node.findTreeChildrenNodes(); // gives us an iterator of the child nodes related to this particular node
+            while (chl.next()) {
+                updateNodeDirection(chl.value, dir);
+            }
+        }
+
+        function addNodeAndLink(e, obj) {
+            var adorn = obj.part;
+            var diagram = adorn.diagram;
+            diagram.startTransaction("Add Node");
+            var oldnode = adorn.adornedPart;
+            var olddata = oldnode.data;
+            // copy the brush and direction to the new node data
+            var newdata = {
+                text: "idea",
+                brush: olddata.brush,
+                dir: olddata.dir,
+                parent: olddata.key
+            };
+            diagram.model.addNodeData(newdata);
+            layoutTree(oldnode);
+            diagram.commitTransaction("Add Node");
+        }
+
+        function layoutTree(node) {
+            if (node.data.key === 0) { // adding to the root?
+                layoutAll(); // lay out everything
+            } else { // otherwise lay out only the subtree starting at this parent node
+                var parts = node.findTreeParts();
+                layoutAngle(parts, node.data.dir === "left" ? 180 : 0);
+            }
+        }
+
+        function layoutAngle(parts, angle) {
+            var layout = go.GraphObject.make(go.TreeLayout, {
+                angle: angle,
+                arrangement: go.TreeLayout.ArrangementFixedRoots,
+                nodeSpacing: 5,
+                layerSpacing: 20,
+                setsPortSpot: false, // don't set port spots since we're managing them with our spotConverter function
+                setsChildPortSpot: false
+            });
+            layout.doLayout(parts);
+        }
+
+        function layoutAll() {
+            var root = myDiagram.findNodeForKey(0);
+            if (root === null) return;
+            myDiagram.startTransaction("Layout");
+            // split the nodes and links into two collections
+            var rightward = new go.Set(go.Part);
+            var leftward = new go.Set(go.Part);
+            root.findLinksConnected().each(function(link) {
+                var child = link.toNode;
+                if (child.data.dir === "left") {
+                    leftward.add(root); // the root node is in both collections
+                    leftward.add(link);
+                    leftward.addAll(child.findTreeParts());
+                } else {
+                    rightward.add(root); // the root node is in both collections
+                    rightward.add(link);
+                    rightward.addAll(child.findTreeParts());
+                }
+            });
+            // do one layout and then the other without moving the shared root node
+            layoutAngle(rightward, 0);
+            layoutAngle(leftward, 180);
+            myDiagram.commitTransaction("Layout");
+        }
+
+        // Show the diagram's model in JSON format
+        function save() {
+            document.getElementById("mySavedModel").value = myDiagram.model.toJson();
+            myDiagram.isModified = false;
+        }
+
+        function load() {
+            myDiagram.model = go.Model.fromJson(document.getElementById("mySavedModel").value);
+        }
+    </script>
+</head>
+
+<body onload="init()">
+    <section id="container">
+        <!-- **********************************************************************************************************************************************************
+      TOP BAR CONTENT & NOTIFICATIONS
+      *********************************************************************************************************************************************************** -->
+        <!--header start-->
+        <header class="header black-bg">
+            <div class="sidebar-toggle-box">
+                <div class="fa fa-bars tooltips" data-placement="right" data-original-title="Toggle Navigation"></div>
+            </div>
+            <!--logo start-->
+            <a href="index.html" class="logo"><b>DASHGUM</b></a>
+            <!--logo end-->
+            <div class="nav notify-row" id="top_menu">
+                <!--  notification start -->
+                <ul class="nav top-menu">
+                    <!-- settings start -->
+                    <li class="dropdown">
+                        <a data-toggle="dropdown" class="dropdown-toggle" href="index.html#">
+                            <i class="fa fa-tasks"></i>
+                            <span class="badge bg-theme">4</span>
+                        </a>
+                        <ul class="dropdown-menu extended tasks-bar">
+                            <div class="notify-arrow notify-arrow-green"></div>
+                            <li>
+                                <p class="green">You have 4 pending tasks</p>
+                            </li>
+                            <li>
+                                <a href="index.html#">
+                                    <div class="task-info">
+                                        <div class="desc">DashGum Admin Panel</div>
+                                        <div class="percent">40%</div>
+                                    </div>
+                                    <div class="progress progress-striped">
+                                        <div class="progress-bar progress-bar-success" role="progressbar" aria-valuenow="40" aria-valuemin="0" aria-valuemax="100" style="width: 40%">
+                                            <span class="sr-only">40% Complete (success)</span>
+                                        </div>
+                                    </div>
+                                </a>
+                            </li>
+                            <li>
+                                <a href="index.html#">
+                                    <div class="task-info">
+                                        <div class="desc">Database Update</div>
+                                        <div class="percent">60%</div>
+                                    </div>
+                                    <div class="progress progress-striped">
+                                        <div class="progress-bar progress-bar-warning" role="progressbar" aria-valuenow="60" aria-valuemin="0" aria-valuemax="100" style="width: 60%">
+                                            <span class="sr-only">60% Complete (warning)</span>
+                                        </div>
+                                    </div>
+                                </a>
+                            </li>
+                            <li>
+                                <a href="index.html#">
+                                    <div class="task-info">
+                                        <div class="desc">Product Development</div>
+                                        <div class="percent">80%</div>
+                                    </div>
+                                    <div class="progress progress-striped">
+                                        <div class="progress-bar progress-bar-info" role="progressbar" aria-valuenow="80" aria-valuemin="0" aria-valuemax="100" style="width: 80%">
+                                            <span class="sr-only">80% Complete</span>
+                                        </div>
+                                    </div>
+                                </a>
+                            </li>
+                            <li>
+                                <a href="index.html#">
+                                    <div class="task-info">
+                                        <div class="desc">Payments Sent</div>
+                                        <div class="percent">70%</div>
+                                    </div>
+                                    <div class="progress progress-striped">
+                                        <div class="progress-bar progress-bar-danger" role="progressbar" aria-valuenow="70" aria-valuemin="0" aria-valuemax="100" style="width: 70%">
+                                            <span class="sr-only">70% Complete (Important)</span>
+                                        </div>
+                                    </div>
+                                </a>
+                            </li>
+                            <li class="external">
+                                <a href="#">See All Tasks</a>
+                            </li>
+                        </ul>
+                    </li>
+                    <!-- settings end -->
+                    <!-- inbox dropdown start-->
+                    <li id="header_inbox_bar" class="dropdown">
+                        <a data-toggle="dropdown" class="dropdown-toggle" href="index.html#">
+                            <i class="fa fa-envelope-o"></i>
+                            <span class="badge bg-theme">5</span>
+                        </a>
+                        <ul class="dropdown-menu extended inbox">
+                            <div class="notify-arrow notify-arrow-green"></div>
+                            <li>
+                                <p class="green">You have 5 new messages</p>
+                            </li>
+                            <li>
+                                <a href="index.html#">
+                                    <span class="photo"><img alt="avatar" src="assets/img/ui-zac.jpg"></span>
+                                    <span class="subject">
+                                    <span class="from">Zac Snider</span>
+                                    <span class="time">Just now</span>
+                                    </span>
+                                    <span class="message">
+                                        Hi mate, how is everything?
+                                    </span>
+                                </a>
+                            </li>
+                            <li>
+                                <a href="index.html#">
+                                    <span class="photo"><img alt="avatar" src="assets/img/ui-divya.jpg"></span>
+                                    <span class="subject">
+                                    <span class="from">Divya Manian</span>
+                                    <span class="time">40 mins.</span>
+                                    </span>
+                                    <span class="message">
+                                     Hi, I need your help with this.
+                                    </span>
+                                </a>
+                            </li>
+                            <li>
+                                <a href="index.html#">
+                                    <span class="photo"><img alt="avatar" src="assets/img/ui-danro.jpg"></span>
+                                    <span class="subject">
+                                    <span class="from">Dan Rogers</span>
+                                    <span class="time">2 hrs.</span>
+                                    </span>
+                                    <span class="message">
+                                        Love your new Dashboard.
+                                    </span>
+                                </a>
+                            </li>
+                            <li>
+                                <a href="index.html#">
+                                    <span class="photo"><img alt="avatar" src="assets/img/ui-sherman.jpg"></span>
+                                    <span class="subject">
+                                    <span class="from">Dj Sherman</span>
+                                    <span class="time">4 hrs.</span>
+                                    </span>
+                                    <span class="message">
+                                        Please, answer asap.
+                                    </span>
+                                </a>
+                            </li>
+                            <li>
+                                <a href="index.html#">See all messages</a>
+                            </li>
+                        </ul>
+                    </li>
+                    <!-- inbox dropdown end -->
+                </ul>
+                <!--  notification end -->
+            </div>
+            <div class="top-menu">
+                <ul class="nav pull-right top-menu">
+                    <li><a class="logout" href="login.html">Logout</a></li>
+                </ul>
+            </div>
+        </header>
+        <!--header end-->
+
+        <!-- **********************************************************************************************************************************************************
+      MAIN SIDEBAR MENU
+      *********************************************************************************************************************************************************** -->
+        <!--sidebar start-->
+        <aside>
+            <div id="sidebar" class="nav-collapse ">
+                <!-- sidebar menu start-->
+                <ul class="sidebar-menu" id="nav-accordion">
+                    <p class="centered">
+                        <a href="profile.html"><img src="assets/img/ui-sam.jpg" class="img-circle" width="60"></a>
+                    </p>
+                    <h5 class="centered">
+                        <?=$email?>
+                    </h5>
+
+                    <li class="mt">
+                        <a class="active" href="Dashboard.html">
+                            <i class="fa fa-dashboard"></i>
+                            <span>Dashboard</span>
+                        </a>
+                    </li>
+
+                    <li class="sub-menu">
+                        <a href="javascript:;">
+                            <i class="fa fa-desktop"></i>
+                            <span>Code</span>
+                        </a>
+                    </li>
+                    <li class="sub-menu">
+                        <a href="javascript:;">
+                            <i class="fa fa-bar-chart"></i>
+                            <span>Coding Convention</span>
+                        </a>
+                        <ul class="sub">
+                            <li><a href="form_component.html">Rule Setting</a></li>
+                            <li><a href="advanced_form_components.html">Rule Docs</a></li>
+                            <li><a href="coderesult.php">Report from Sonar</a></li>
+                        </ul>
+                    </li>
+                    <li class="sub-menu">
+                        <a href="javascript:;">
+                            <i class="fa fa-file-code-o"></i>
+                            <span>Code Review</span>
+                        </a>
+                    </li>
+                    <li class="sub-menu">
+                        <a href="javascript:;">
+                            <i class="fa fa-users"></i>
+                            <span>Account & Team</span>
+                        </a>
+                        <ul class="sub">
+                            <li><a href="blank.html">Edit profile</a></li>
+                            <li><a href="login.html">Team setting</a></li>
+                            <li><a href="lock_screen.html">Message</a></li>
+                            <li><a href="lock_screen.html">Chat Room</a></li>
+                        </ul>
+                    </li>
+                    <li class="sub-menu">
+                        <a href="javascript:;">
+                            <i class="fa fa-cogs"></i>
+                            <span>Agile Setting</span>
+                        </a>
+                        <ul class="sub">
+                            <li><a href="dropzone.html">Issue</a></li>
+                            <li><a href="sprint-plan.html">Sprint Plan</a></li>
+                            <li><a href="Schedular.html">Calendar</a></li>
+                        </ul>
+                    </li>
+                    <li class="sub-menu">
+                        <a href="ManageProject.html">
+                            <i class="fa fa-desktop"></i>
+                            <span>ManageProject</span>
+                        </a>
+                    </li>
+                    <li class="sub-menu">
+                        <a href="lobby.html">
+                            <i class="fa fa-comments-o"></i>
+                            <span>Chat Room</span>
+                        </a>
+                    </li>
+                    <li class="sub-menu">
+                        <a href="Gantt.php">
+                            <i class="fa fa-tasks"></i>
+                            <span>Scheduler</span>
+                        </a>
+                    </li>
+                </ul>
+                <!-- sidebar menu end-->
+            </div>
+        </aside>
+        <!--sidebar end-->
+
+        <section id="main-content">
+            <section class="wrapper">
+                <div class="row mt">
+                    <div id="sample" class="col-md-12">
+                                <h4><i class="fa fa-angle-right"></i>수업 과정</h4>
+                        <div id="myDiagramDiv" style="border: solid 1px black; width:100%; height:300px;"></div>
+                         <div class="course_curriculum ">
+<h3 class="heading">
+<span>Project 교육과정</span>
+</h3>
+<div class="course_curriculum ">
+<table class="table"> <tr class="course_section">
+<td colspan="4">Shopping Mall 만들기</td>
+</tr>
+<tr class="course_lesson">
+<td class="curriculum-icon"><i class="icon-play"></i></td>
+<td><a href="https://www.inflearn.com/unit/%ea%b0%95%ec%9d%98%ec%86%8c%ea%b0%9c-%eb%b0%8f-%ec%8b%a4%ec%8a%b5%ed%99%98%ea%b2%bd/" class="ajax_unit">강의소개 및 실습환경</a></td>
+<td><span class="free"> </span> </td>
+<td><span class="time"><i class="fa fa-clock-o"></i> 00:12:00</span></td>
+</tr>
+<tr class="course_section">
+<td colspan="4">제1장: Login 화면 만들기</td>
+</tr>
+<tr class="course_lesson">
+<td class="curriculum-icon"><i class="icon-play"></i></td>
+<td><a href="https://www.inflearn.com/unit/%eb%b3%80%ec%88%98-%eb%b0%b0%ec%97%b4-%eb%b0%98%eb%b3%b5%eb%ac%b8-1/" class="ajax_unit">제1-1장: 회원가입 화면</a></td>
+<td><span class="label label-info">Easy</span> </td>
+<td><span class="time"><i class="fa fa-clock-o"></i> 00:40:00</span></td>
+</tr>
+<tr class="course_lesson">
+<td class="curriculum-icon"><i class="icon-play"></i></td>
+<td><a href="https://www.inflearn.com/unit/%eb%b3%80%ec%88%98-%eb%b0%b0%ec%97%b4-%eb%b0%98%eb%b3%b5%eb%ac%b8-2/" class="ajax_unit">제1-2장: 로그인 및 로그아웃 기능 구현</a></td>
+<td><span class="label label-info">Easy</span> </td>
+<td><span class="time"><i class="fa fa-clock-o"></i> 00:19:00</span></td>
+</tr>
+<tr class="course_lesson">
+<td class="curriculum-icon"><i class="icon-play"></i></td>
+<td><a href="https://www.inflearn.com/unit/%eb%b3%80%ec%88%98-%eb%b0%b0%ec%97%b4-%eb%b0%98%eb%b3%b5%eb%ac%b8-3/" class="ajax_unit">제1-3장: (회원정보 관리화면) 회원정보 수정기능</a></td>
+<td><span class="label label-warning">Normal</span> </td>
+<td><span class="time"><i class="fa fa-clock-o"></i> 00:15:00</span></td>
+</tr>
+<tr class="course_lesson">
+<td class="curriculum-icon"><i class="icon-play"></i></td>
+<td><a href="https://www.inflearn.com/unit/%eb%b3%80%ec%88%98-%eb%b0%b0%ec%97%b4-%eb%b0%98%eb%b3%b5%eb%ac%b8-4/" class="ajax_unit">제1-3장: (회원정보 관리화면) 회원탈퇴 기능</a></td>
+<td><span class="label label-warning">Normal</span> </td>
+<td><span class="time"><i class="fa fa-clock-o"></i> 00:27:00</span></td>
+</tr>
+    <tr class="course_section">
+<td colspan="4">제2장: 상품 구매 화면 만들기</td>
+</tr>
+<tr class="course_lesson">
+<td class="curriculum-icon"><i class="icon-play"></i></td>
+<td><a href="https://www.inflearn.com/unit/%eb%b3%80%ec%88%98-%eb%b0%b0%ec%97%b4-%eb%b0%98%eb%b3%b5%eb%ac%b8-1/" class="ajax_unit">제2-1장: 결제모듈 구현</a></td>
+<td><span class="label label-danger">Hard</span> </td>
+<td><span class="time"><i class="fa fa-clock-o"></i> 00:40:00</span></td>
+</tr>
+<tr class="course_lesson">
+<td class="curriculum-icon"><i class="icon-play"></i></td>
+<td><a href="https://www.inflearn.com/unit/%eb%b3%80%ec%88%98-%eb%b0%b0%ec%97%b4-%eb%b0%98%eb%b3%b5%eb%ac%b8-2/" class="ajax_unit">제2-2장: 장바구니 기능 구현</a></td>
+<td><span class="label label-warning">Normal</span> </td>
+<td><span class="time"><i class="fa fa-clock-o"></i> 00:19:00</span></td>
+</tr>
+    <tr class="course_section">
+<td colspan="4">제3장: 상품 관리 화면 만들기</td>
+</tr>
+<tr class="course_lesson">
+<td class="curriculum-icon"><i class="icon-play"></i></td>
+<td><a href="https://www.inflearn.com/unit/%eb%b3%80%ec%88%98-%eb%b0%b0%ec%97%b4-%eb%b0%98%eb%b3%b5%eb%ac%b8-1/" class="ajax_unit">제3-1장: 상품등록 기능 구현</a></td>
+<td><span class="label label-info">Easy</span> </td>
+<td><span class="time"><i class="fa fa-clock-o"></i> 00:40:00</span></td>
+</tr>
+<tr class="course_lesson">
+<td class="curriculum-icon"><i class="icon-play"></i></td>
+<td><a href="https://www.inflearn.com/unit/%eb%b3%80%ec%88%98-%eb%b0%b0%ec%97%b4-%eb%b0%98%eb%b3%b5%eb%ac%b8-2/" class="ajax_unit">제3-2장: 상품삭제 기능 구현</a></td>
+<td><span class="label label-info">Easy</span> </td>
+<td><span class="time"><i class="fa fa-clock-o"></i> 00:19:00</span></td>
+</tr>
+<tr class="course_lesson">
+<td class="curriculum-icon"><i class="icon-play"></i></td>
+<td><a href="https://www.inflearn.com/unit/%eb%b3%80%ec%88%98-%eb%b0%b0%ec%97%b4-%eb%b0%98%eb%b3%b5%eb%ac%b8-3/" class="ajax_unit">제3-3장: 상품 상세보기 기능 구현</a></td>
+<td><span class="label label-info">Easy</span> </td>
+<td><span class="time"><i class="fa fa-clock-o"></i> 00:15:00</span></td>
+</tr>
+    </table>
+                             </div>
+                        </div>
+                        <button id="SaveButton" onclick="save()">Save</button>
+                        <button onclick="load()">Load</button>
+                        <button onclick="layoutAll()">Layout</button> Diagram Model saved in JSON format:
+                        <br />
+                        <textarea id="mySavedModel" style="width:100%;height:400px">
+{ "class": "go.TreeModel",
+  "nodeDataArray": [
+{"key":0, "text":"Shopping Mall 만들기", "loc":"0 0"},
+{"key":2, "parent":0, "text":"상품 관리 화면", "brush":"darkseagreen", "dir":"right", "loc":"203 0"},
+{"key":21, "parent":2, "text":"상품등록 기능", "brush":"darkseagreen", "dir":"right", "loc":"350 -30"},
+{"key":22, "parent":2, "text":"상품삭제 기능", "brush":"darkseagreen", "dir":"right", "loc":"350 0"},
+{"key":22, "parent":2, "text":"상품상세보기  기능", "brush":"darkseagreen", "dir":"right", "loc":"350 50"},
+{"key":3, "parent":0, "text":"Login 화면", "brush":"palevioletred", "dir":"left", "loc":"-20 -31.75"},
+{"key":31, "parent":3, "text":"회원 정보 관리 화면", "brush":"palevioletred", "dir":"left", "loc":"-117 -64.25"},
+{"key":32, "parent":3, "text":"로그인 및 로그아웃 기능 구현", "brush":"palevioletred", "dir":"left", "loc":"-117 -25.25"},
+{"key":33, "parent":3, "text":"회원가입 화면", "brush":"palevioletred", "dir":"left", "loc":"-117 0.75"},
+{"key":331, "parent":31, "text":"회원정보 수정기능", "brush":"palevioletred", "dir":"left", "loc":"-251 -77.25"},
+{"key":332, "parent":31, "text":"회원탈퇴 기능", "brush":"palevioletred", "dir":"left", "loc":"-251 -51.25"},
+{"key":4, "parent":0, "text":"상품 구매 화면", "brush":"coral", "dir":"left", "loc":"-20 102.75"},
+{"key":41, "parent":4, "text":"결제모듈 구현", "brush":"coral", "dir":"left", "loc":"-153 76.75"},
+{"key":42, "parent":4, "text":"장바구니 기능구현", "brush":"coral", "dir":"left", "loc":"-153 152.75"}
+ ]
+}
+  </textarea>
+                    </div>
+                </div>
+            </section>
+        </section>
+    </section>
+</body>
+
+</html>
